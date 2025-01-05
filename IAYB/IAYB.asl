@@ -45,12 +45,14 @@ init
 
     vars.totalIGT = 0;
     vars.hasCompletedCurrentLevel = false;
+    vars.timeAddedForAttempt = false;
 }
 
 onStart
 {
     vars.totalIGT = 0;
     vars.hasCompletedCurrentLevel = false;
+    vars.timeAddedForAttempt = false;
 }
 
 update
@@ -60,19 +62,34 @@ update
         vars.hasCompletedCurrentLevel = true;
     }
 
-    if (current.combatTime == 0 && old.combatTime != 0) {
-        if (!vars.hasCompletedCurrentLevel) {
-            // Player reset the level (do not give regained time, penalise them for it)
-            vars.totalIGT += old.combatTime;
-        } else {
-            // Level has probably just been loaded into
-            vars.hasCompletedCurrentLevel = false;
-        }
+    var timeReset = current.combatTime == 0 && old.combatTime != 0;
+    if (
+        !vars.hasCompletedCurrentLevel && !vars.timeAddedForAttempt && (
+            // Player reset the level
+            timeReset ||
+            // Player died
+            (old.levelState == 1 && current.levelState == 3)
+        )
+    ) {
+        vars.timeAddedForAttempt = true;
+        // Do not give regained time, penalise them for it
+        vars.totalIGT += old.combatTime;
     }
 
     if (old.levelState == 1 && current.levelState == 2) {
         // Player beat the level, give the regained time
         vars.totalIGT += current.combatTime - current.regainedCombatTime;
+        vars.timeAddedForAttempt = true;
+    }
+    
+    if (timeReset) {
+        // Level has probably just been loaded into, so they haven't completed this level
+        vars.hasCompletedCurrentLevel = false;
+    }
+
+    if (old.combatTime == 0 && current.combatTime != 0) {
+        // Time's just started so new attempt
+        vars.timeAddedForAttempt = false;
     }
 }
 
