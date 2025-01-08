@@ -15,6 +15,7 @@ init
 {
     vars.Helper.TryLoad = (Func<dynamic, bool>)(mono => {
 
+        vars.Helper["levelId"] = mono.Make<int>("GameManager", "instance", "levelController", "informationSetter", "levelInformation", "levelNumber");
         //Level states: 0 - intro; 1 - active; 2 - completed; 3 - failed.
         vars.Helper["levelState"] = mono.Make<byte>("GameManager", "instance", "levelController", "levelState");
 
@@ -43,9 +44,41 @@ init
         return true;
     });
 
+    vars.IsRealTimeLevel = (Func<dynamic, bool>)(state => {
+        // tutorial, cavalry, permafrost
+        return state.levelId == 1 || state.levelId == 8 || state.levelId == 15;
+    });
+
+    vars.GetLevelInGameTime = (Func<dynamic, bool, float>)((state, includeRegainedTime) => {
+        // Just use real elapsed time for these levels
+        if (vars.IsRealTimeLevel(current)) {
+            return (float)vars.levelRealTimeStopwatch.Elapsed.TotalSeconds;
+        }
+
+        if (includeRegainedTime) {
+            return state.combatTime - state.regainedCombatTime;
+        }
+        
+        return state.combatTime;
+    });
+
+    vars.JustLoadedLevel = (Func<dynamic, dynamic, bool>)((oldState, currentState) => {
+        return currentState.sceneTransition == 2 && oldState.tracking == false && currentState.tracking == true;
+    });
+
+    vars.JustCompletedLevel = (Func<dynamic, dynamic, bool>)((oldState, currentState) => {
+        if (currentState.cutsceneID == 22 && oldState.destination == "Scenes/UI/Cutscenes/Cutscene") {
+            return oldState.destination == "Scenes/UI/Cutscenes/Cutscene" && currentState.destination == "Scenes/UI/Menus/LevelSelect";
+        } else {
+            return (oldState.destination == "#01c_Special_Tutorial" && currentState.destination == "Scenes/UI/Menus/LevelSelect")
+                || (oldState.levelState == 1 && currentState.levelState == 2);
+        }
+    });
+
     vars.totalIGT = 0;
     vars.hasCompletedCurrentLevel = false;
     vars.timeAddedForAttempt = false;
+    vars.levelRealTimeStopwatch = new Stopwatch();
 }
 
 onStart
@@ -55,11 +88,54 @@ onStart
     vars.timeAddedForAttempt = false;
 }
 
+onReset
+{
+    vars.levelRealTimeStopwatch.Reset();
+    vars.Log("real time stopwatch reset " + vars.totalIGT);
+}
+
 update
 {
-    if (!vars.hasCompletedCurrentLevel && old.levelState == 1 && current.levelState == 2) {
+    if (old.sceneTransition != current.sceneTransition) {
+        vars.Log("sceneTransition: " + old.sceneTransition + " -> " + current.sceneTransition);
+    }
+    if (old.cutsceneID != current.cutsceneID) {
+        vars.Log("cutsceneID: " + old.cutsceneID + " -> " + current.cutsceneID);
+    }
+    if (old.tracking != current.tracking) {
+        vars.Log("tracking: " + old.tracking + " -> " + current.tracking);
+    }
+    if (old.levelId != current.levelId) {
+        vars.Log("levelId: " + old.levelId + " -> " + current.levelId);
+    }
+
+    if (old.levelState != current.levelState) {
+        vars.Log("levelState: " + old.levelState + " -> " + current.levelState);
+    }
+
+    if (old.destination != current.destination) {
+        vars.Log("destination: " + old.destination + " -> " + current.destination);
+    }
+
+    if (old.combatTime != 0 && current.combatTime == 0) {
+        vars.Log("combatTime reset at " + old.combatTime + ": " + current.levelState);
+    }
+
+    vars.AddInGameTime = (Action<float>)(time => {
+        vars.totalIGT += time;
+        vars.Log("totalIGT: " + vars.totalIGT + " (" + time + ")");
+        vars.timeAddedForAttempt = true;
+        vars.levelRealTimeStopwatch.Reset();
+    });
+
+    if (vars.JustCompletedLevel(old, current)) {
         // Level complete - so the next time the timer resets, do not add any time
         vars.hasCompletedCurrentLevel = true;
+
+        // Player beat the level, give the regained time
+        // Add an hour (like the leaderboards have) to deal with negative times.
+        // (LiveSplit will not save negative times on segments, so it needs to be on every split)
+        vars.AddInGameTime(3600 + vars.GetLevelInGameTime(current, true));
     }
 
     var timeReset = current.combatTime == 0 && old.combatTime != 0;
@@ -71,15 +147,8 @@ update
             (old.levelState == 1 && current.levelState == 3)
         )
     ) {
-        vars.timeAddedForAttempt = true;
         // Do not give regained time, penalise them for it
-        vars.totalIGT += old.combatTime;
-    }
-
-    if (old.levelState == 1 && current.levelState == 2) {
-        // Player beat the level, give the regained time
-        vars.totalIGT += current.combatTime - current.regainedCombatTime;
-        vars.timeAddedForAttempt = true;
+        vars.AddInGameTime(vars.GetLevelInGameTime(old, false));
     }
     
     if (timeReset) {
@@ -90,6 +159,12 @@ update
     if (old.combatTime == 0 && current.combatTime != 0) {
         // Time's just started so new attempt
         vars.timeAddedForAttempt = false;
+    }
+
+    // Track real time for levels that need it
+    if (vars.JustLoadedLevel(old, current)) {
+        vars.Log("timer started: '" + current.destination + "', levelId: " + current.levelId);
+        vars.levelRealTimeStopwatch.Start();
     }
 }
 
@@ -111,43 +186,37 @@ isLoading
 gameTime
 {
     if (settings["igt"]) {
-        // Add a base 60 (like the leaderboards have) to deal with negative times.
-        // Someone could break this if they get more than 60 seconds of negative time in a run.
-        // (LiveSplit will not save negative times)
-        var baseTime = 60 + vars.totalIGT;
-        
-        if (current.levelState == 1) {
-            // If the level is active, we should track whatever the current time is
-            var currentLevelTimeSeconds = current.combatTime - current.regainedCombatTime;
-            return TimeSpan.FromSeconds(baseTime + currentLevelTimeSeconds);
+        if (current.levelState == 1 || vars.IsRealTimeLevel(current)) {
+            // If the level is active, we should track whatever the current time is as it happens
+            return TimeSpan.FromSeconds(vars.totalIGT + vars.GetLevelInGameTime(current, true));
         } else {
-            return TimeSpan.FromSeconds(baseTime);
+            return TimeSpan.FromSeconds(vars.totalIGT);
         }
     }
+
+    // Don't set game time if not in IGT mode, let livesplit increment timer as normal
 }
 
 start
 {
-    if (settings["igt"]) {
-        // Timer starts when the combat time starts for IGT, not when you reset the level
-        return !old.timerStarted && current.timerStarted;
+    bool justLoadedIntoLevel = vars.JustLoadedLevel(old, current);
+    if (!settings["ILs"]) {
+        return justLoadedIntoLevel && current.levelId == 1;
     }
 
-    bool hasLoadedIntoLevel = current.sceneTransition == 2 && old.tracking == false && current.tracking == true;
-    if (settings["ILs"]) {
-        return hasLoadedIntoLevel;
+    if (settings["igt"]) {
+        // Timer starts when the combat time starts for IGT, not when you reset the level
+        return (!old.timerStarted && current.timerStarted) || (
+            vars.IsRealTimeLevel(current) && justLoadedIntoLevel
+        );
     }
     
-    return hasLoadedIntoLevel && current.destination == "Scenes/!___STORY SCENES/#01a_Special_Tutorial";
+    return justLoadedIntoLevel;
 }
 
 split
 {
-    if (current.cutsceneID == 22 && old.destination == "Scenes/UI/Cutscenes/Cutscene") {
-        return old.destination == "Scenes/UI/Cutscenes/Cutscene" && current.destination == "Scenes/UI/Menus/LevelSelect";
-    } else {
-        return (old.destination == "#01c_Special_Tutorial" && current.destination == "Scenes/UI/Menus/LevelSelect") || (old.levelState == 1 && current.levelState == 2);
-    }
+    return vars.JustCompletedLevel(old, current);
 }
 
 reset
