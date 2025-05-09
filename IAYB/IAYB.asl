@@ -7,6 +7,7 @@ startup
 
     settings.Add("ILs", false, "Individual Level Mode (start on every level, reset when level resets)");
     settings.Add("igt", false, "Use in-game-time instead of real time (does not work for full game)", "ILs");
+    settings.Add("objectives", false, "Split on main objective progress", "ILs");
     
     vars.Helper.AlertLoadless();
 }
@@ -44,6 +45,46 @@ init
         //#25 Mercy split
         vars.Helper["cutsceneID"] = mono.Make<byte>("GameManager", "instance", "cutsceneInfoStorer", "sequence", "ID");
 
+        // OBJECTIVES
+        vars.Helper["mainObjectiveIndex"] = mono.Make<int>("GameManager", "instance", "objectiveManager", "currentMainObjective");
+        vars.Helper["mainObjectives"] = mono.MakeArray<IntPtr>("GameManager", "instance", "objectiveManager", "mainObjectives");
+
+        var LOInteractWithObjects = mono["LevelObjectiveInteractWithObjects"];
+        var PlayerInteractableGenericOneUse = mono["PlayerInteractableGenericOneUse"];
+
+        vars.ReadObjectiveProgress = (Func<IntPtr, int>)(objectivePtr =>
+        {
+            var type = vars.Helper.ReadString(256, ReadStringType.UTF8, objectivePtr + 0x0, 0x0, 0x48, 0);
+            var prog = vars.GetObjectiveProgress(objectivePtr, type);
+            
+            // vars.Log("mainObjectiveIndex: " + current.mainObjectiveIndex);
+            // vars.Log("Objective at 0x" + objectivePtr.ToString("X"));
+            // vars.Log("- type: " + type);
+            // vars.Log("- progress: " + prog);
+
+            return prog;
+        });
+
+        vars.GetObjectiveProgress = (Func<IntPtr, string, int>)((objectivePtr, objectiveType) =>
+        {
+            switch (objectiveType) {
+                case "LevelObjectiveInteractWithObjects":
+                    var progress = 0;
+                    
+                    var interactables = vars.Helper.ReadArray<IntPtr>(objectivePtr + LOInteractWithObjects["interactables"]);
+                    foreach (var interactablePtr in interactables) {
+                        var interactedWith = vars.Helper.Read<bool>(interactablePtr + PlayerInteractableGenericOneUse["interactedWith"]);
+                        progress += interactedWith ? 1 : 0;
+                    }
+
+                    // -3: the objective was completed. we should not use the intra-objective progress to split between objectives
+                    return interactables.Length != progress ? progress : -3;
+            }
+
+            // -2: no known progress for this type
+            return -2;
+        });
+
         return true;
     });
 
@@ -55,6 +96,11 @@ onStart
 {
     vars.totalIGT = 0;
     vars.hasCompletedCurrentLevel = false;
+    current.objectiveProgress = -1;
+
+    foreach (var objectivePtr in current.mainObjectives) {
+        vars.ReadObjectiveProgress(objectivePtr);
+    }
 }
 
 update
@@ -77,6 +123,13 @@ update
     if (old.levelState == 1 && current.levelState == 2) {
         // Player beat the level, give the regained time
         vars.totalIGT += current.combatTime - current.regainedCombatTime;
+    }
+
+    // objectives
+    if (current.mainObjectives.Length > current.mainObjectiveIndex) {
+        current.objectiveProgress = vars.ReadObjectiveProgress(current.mainObjectives[current.mainObjectiveIndex]);
+    } else {
+        current.objectiveProgress = -1;
     }
 }
 
@@ -130,6 +183,20 @@ start
 
 split
 {
+    if (settings["objectives"]) {
+        if (current.mainObjectiveIndex == old.mainObjectiveIndex + 1) {
+            vars.Log("Advanced main objective from " + old.mainObjectiveIndex + " to " + current.mainObjectiveIndex);
+            return true;
+        }
+
+        if (current.objectiveProgress >= 0 && old.objectiveProgress >= 0
+         && current.objectiveProgress > old.objectiveProgress
+        ) {
+            vars.Log("Advanced objective progress from " + old.objectiveProgress + " to " + current.objectiveProgress);
+            return true;
+        }
+    }
+
     if (current.cutsceneID == 22 && old.destination == "Scenes/UI/Cutscenes/Cutscene") {
         return old.destination == "Scenes/UI/Cutscenes/Cutscene" && current.destination == "Scenes/UI/Menus/LevelSelect";
     } else {
