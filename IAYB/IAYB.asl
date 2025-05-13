@@ -9,6 +9,8 @@ startup
     settings.Add("igt", false, "Use in-game-time instead of real time (does not work for full game)", "ILs");
     settings.Add("objectives", false, "Split on main objective progress", "ILs");
     
+    vars.Timer = new TimerModel { CurrentState = timer };
+
     vars.Helper.AlertLoadless();
 }
 
@@ -49,12 +51,20 @@ init
         vars.Helper["mainObjectiveIndex"] = mono.Make<int>("GameManager", "instance", "objectiveManager", "currentMainObjective");
         vars.Helper["mainObjectives"] = mono.MakeArray<IntPtr>("GameManager", "instance", "objectiveManager", "mainObjectives");
 
+        vars.Helper["enemiesKilled"] = mono.Make<int>("GameManager", "instance", "levelController", "totalEnemiesKilledInLevel");
+        vars.Helper["enemiesInLevel"] = mono.Make<int>("GameManager", "instance", "AI", "totalEnemiesInLevel");
+
         var LOInteractWithObjects = mono["LevelObjectiveInteractWithObjects"];
         var PlayerInteractableGenericOneUse = mono["PlayerInteractableGenericOneUse"];
 
+        vars.ReadObjectiveType = (Func<IntPtr, string>)(objectivePtr =>
+        {
+            return vars.Helper.ReadString(256, ReadStringType.UTF8, objectivePtr + 0x0, 0x0, 0x48, 0);
+        });
+
         vars.ReadObjectiveProgress = (Func<IntPtr, int>)(objectivePtr =>
         {
-            var type = vars.Helper.ReadString(256, ReadStringType.UTF8, objectivePtr + 0x0, 0x0, 0x48, 0);
+            var type = vars.ReadObjectiveType(objectivePtr);
             var prog = vars.GetObjectiveProgress(objectivePtr, type);
             
             // vars.Log("mainObjectiveIndex: " + current.mainObjectiveIndex);
@@ -79,6 +89,8 @@ init
 
                     // -3: the objective was completed. we should not use the intra-objective progress to split between objectives
                     return interactables.Length != progress ? progress : -3;
+                case "LevelObjectiveKillAllEnemies":
+                    return current.enemiesKilled != current.enemiesInLevel ? current.enemiesKilled : -3;
             }
 
             // -2: no known progress for this type
@@ -89,42 +101,33 @@ init
     });
 
     vars.totalIGT = 0;
-    vars.hasCompletedCurrentLevel = false;
+    current.lastNonZeroTime = 0; // lol
 }
 
 onStart
 {
     vars.totalIGT = 0;
-    vars.hasCompletedCurrentLevel = false;
     current.objectiveProgress = -1;
 
     foreach (var objectivePtr in current.mainObjectives) {
-        vars.ReadObjectiveProgress(objectivePtr);
+        // var type = vars.ReadObjectiveType(objectivePtr);
+        // vars.Log(type);
+        // vars.ReadObjectiveProgress(objectivePtr);
     }
+}
+
+onSplit
+{
+    vars.totalIGT += 3600;
+}
+
+onReset
+{
+    current.lastNonZeroTime = 0;
 }
 
 update
 {
-    if (!vars.hasCompletedCurrentLevel && old.levelState == 1 && current.levelState == 2) {
-        // Level complete - so the next time the timer resets, do not add any time
-        vars.hasCompletedCurrentLevel = true;
-    }
-
-    if (current.combatTime == 0 && old.combatTime != 0) {
-        if (!vars.hasCompletedCurrentLevel) {
-            // Player reset the level (do not give regained time, penalise them for it)
-            vars.totalIGT += old.combatTime;
-        } else {
-            // Level has probably just been loaded into
-            vars.hasCompletedCurrentLevel = false;
-        }
-    }
-
-    if (old.levelState == 1 && current.levelState == 2) {
-        // Player beat the level, give the regained time
-        vars.totalIGT += current.combatTime - current.regainedCombatTime;
-    }
-
     // objectives
     if (current.mainObjectives.Length > current.mainObjectiveIndex) {
         current.objectiveProgress = vars.ReadObjectiveProgress(current.mainObjectives[current.mainObjectiveIndex]);
@@ -155,14 +158,8 @@ gameTime
         // Someone could break this if they get more than 60 seconds of negative time in a run.
         // (LiveSplit will not save negative times)
         var baseTime = 60 + vars.totalIGT;
-        
-        if (current.levelState == 1) {
-            // If the level is active, we should track whatever the current time is
-            var currentLevelTimeSeconds = current.combatTime - current.regainedCombatTime;
-            return TimeSpan.FromSeconds(baseTime + currentLevelTimeSeconds);
-        } else {
-            return TimeSpan.FromSeconds(baseTime);
-        }
+        var currentLevelTimeSeconds = current.combatTime - current.regainedCombatTime;
+        return TimeSpan.FromSeconds(baseTime + currentLevelTimeSeconds);
     }
 }
 
