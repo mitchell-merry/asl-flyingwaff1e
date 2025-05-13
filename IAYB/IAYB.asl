@@ -56,6 +56,8 @@ init
 
         var LOInteractWithObjects = mono["LevelObjectiveInteractWithObjects"];
         var PlayerInteractableGenericOneUse = mono["PlayerInteractableGenericOneUse"];
+        
+        var LevelObjectiveDestroyObjects = mono["LevelObjectiveDestroyObjects"];
 
         vars.ReadObjectiveType = (Func<IntPtr, string>)(objectivePtr =>
         {
@@ -91,6 +93,10 @@ init
                     return interactables.Length != progress ? progress : -3;
                 case "LevelObjectiveKillAllEnemies":
                     return current.enemiesKilled != current.enemiesInLevel ? current.enemiesKilled : -3;
+                case "LevelObjectiveDestroyObjects":
+                    var destroyedTargets = vars.Helper.Read<int>(objectivePtr + LevelObjectiveDestroyObjects["destroyedTargets"]);
+                    var targets = vars.Helper.ReadArray<IntPtr>(objectivePtr + LevelObjectiveDestroyObjects["targets"]);
+                    return destroyedTargets != targets.Length ? destroyedTargets : -3;
             }
 
             // -2: no known progress for this type
